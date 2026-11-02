@@ -1,6 +1,8 @@
 # libWinit
 C style wrapper for [Winit](https://github.com/rust-windowing/winit/) - cross-platform window creation and management in Rust.
 
+This repository is a fork of the original [libwinit](https://github.com/feenkcom/libwinit) project, updated to support Winit 0.30.x.
+
 ## Generating `winit.h` header
 
 Make sure to install latest [cbindgen](https://github.com/eqrion/cbindgen):
