@@ -20,7 +20,15 @@ using_namespaces = []
 sys_includes = []
 includes = [ ]
 no_includes = false
-after_includes = ""
+after_includes = """
+typedef struct String String;
+typedef struct MonitorHandle MonitorHandle;
+typedef struct WindowId WindowId;
+typedef struct Window Window;
+typedef struct AndroidApp AndroidApp;
+typedef struct RawWindowHandle RawWindowHandle;
+typedef struct RawDisplayHandle RawDisplayHandle;
+"""
 include_guard = "winit_h"
 
 ############################ Code Style Options ################################
@@ -55,7 +63,7 @@ renaming_overrides_prefixing = false
 
 [export.rename]
 "ValueBox_WinitEventLoop" = "EventLoop"
-"ValueBox_WindowBuilder" = "WindowBuilder"
+"ValueBox_WindowAttributes" = "WindowAttributes"
 "ValueBox_Window" = "Window"
 
 "VeryRawWindowHandle" = "RawWindowHandle"
@@ -148,10 +156,10 @@ bitflags = false
 
 [parse]
 parse_deps = true
-include = [ "winit", "value-box", "geometry-box", "string-box", "value-box-ffi", "raw-window-handle-extensions" ]
+include = [ "value-box", "geometry-box" ]
 exclude = []
 clean = false
-extra_bindings = ["value-box-ffi", "raw-window-handle-extensions"]
+extra_bindings = []
 
 [parse.expand]
 crates = []

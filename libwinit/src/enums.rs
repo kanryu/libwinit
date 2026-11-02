@@ -5,6 +5,8 @@ use winit::window::CursorIcon;
 pub enum WinitUserEvent {
     /// The virtual machine sends
     WakeUp,
+    /// Requests the event loop to exit.
+    Exit,
 }
 
 impl Default for WinitUserEvent {
@@ -74,8 +76,8 @@ impl From<WinitCursorIcon> for CursorIcon {
         match cursor_icon {
             WinitCursorIcon::Default => CursorIcon::Default,
             WinitCursorIcon::Crosshair => CursorIcon::Crosshair,
-            WinitCursorIcon::Hand => CursorIcon::Hand,
-            WinitCursorIcon::Arrow => CursorIcon::Arrow,
+            WinitCursorIcon::Hand => CursorIcon::Pointer,
+            WinitCursorIcon::Arrow => CursorIcon::Default,
             WinitCursorIcon::Move => CursorIcon::Move,
             WinitCursorIcon::Text => CursorIcon::Text,
             WinitCursorIcon::Wait => CursorIcon::Wait,

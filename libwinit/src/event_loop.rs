@@ -1,16 +1,22 @@
+use std::collections::HashSet;
 use std::ffi::c_void;
-use winit::event_loop::{
-    ControlFlow, EventLoop, EventLoopBuilder, EventLoopProxy, EventLoopWindowTarget,
-};
+use std::sync::{Arc, Mutex};
+use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
 use winit::monitor::MonitorHandle;
 
-use crate::events::{EventProcessor, WinitControlFlow, WinitEvent};
+use crate::events::{
+    winit_event_loop_process_ime_commit, EventProcessor, WinitControlFlow, WinitEvent,
+};
 use crate::WinitUserEvent;
-use value_box::{BoxerError, ReturnBoxerResult, ValueBox, ValueBoxIntoRaw, ValueBoxPointer};
+use value_box::{ReturnBoxerResult, ValueBox, ValueBoxIntoRaw, ValueBoxPointer};
 
-pub type WinitEventLoop = EventLoop<WinitUserEvent>;
-pub type WinitEventLoopBuilder = EventLoopBuilder<WinitUserEvent>;
-pub type WinitEventLoopProxy = EventLoopProxy<WinitUserEvent>;
+pub struct WinitEventLoop {
+    pub(crate) event_loop: EventLoop<WinitUserEvent>,
+    pub(crate) windows: Arc<Mutex<HashSet<winit::window::WindowId>>>,
+    pub(crate) primary_monitor: Arc<Mutex<Option<MonitorHandle>>>,
+}
+#[derive(Debug)]
+pub struct WinitEventLoopProxy(pub(crate) EventLoopProxy<WinitUserEvent>);
 
 #[no_mangle]
 pub extern "C" fn winit_event_loop_new() -> *mut ValueBox<WinitEventLoop> {
@@ -21,7 +27,14 @@ pub extern "C" fn winit_event_loop_new() -> *mut ValueBox<WinitEventLoop> {
             std::env::set_var("WINIT_UNIX_BACKEND", "x11");
         }
     }
-    ValueBox::new(WinitEventLoopBuilder::with_user_event().build()).into_raw()
+    ValueBox::new(WinitEventLoop {
+        event_loop: EventLoop::with_user_event()
+            .build()
+            .expect("failed to create winit event loop"),
+        windows: Arc::new(Mutex::new(HashSet::new())),
+        primary_monitor: Arc::new(Mutex::new(None)),
+    })
+    .into_raw()
 }
 
 #[no_mangle]
@@ -41,7 +54,7 @@ pub enum WinitEventLoopType {
 
 #[cfg(target_os = "linux")]
 pub fn get_event_loop_type(
-    _event_loop: &EventLoopWindowTarget<WinitUserEvent>,
+    _event_loop: &WinitEventLoop,
 ) -> WinitEventLoopType {
     use winit::platform::wayland::EventLoopWindowTargetExtWayland;
     use winit::platform::x11::EventLoopWindowTargetExtX11;
@@ -57,21 +70,21 @@ pub fn get_event_loop_type(
 
 #[cfg(target_os = "windows")]
 pub fn get_event_loop_type(
-    _event_loop: &EventLoopWindowTarget<WinitUserEvent>,
+    _event_loop: &WinitEventLoop,
 ) -> WinitEventLoopType {
     WinitEventLoopType::Windows
 }
 
 #[cfg(target_os = "macos")]
 pub fn get_event_loop_type(
-    _event_loop: &EventLoopWindowTarget<WinitUserEvent>,
+    _event_loop: &WinitEventLoop,
 ) -> WinitEventLoopType {
     WinitEventLoopType::MacOS
 }
 
 #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
 pub fn get_event_loop_type(
-    _event_loop: &EventLoopWindowTarget<WinitUserEvent>,
+    _event_loop: &WinitEventLoop,
 ) -> WinitEventLoopType {
     WinitEventLoopType::Unknown
 }
@@ -87,7 +100,7 @@ pub extern "C" fn winit_event_loop_get_type(
 
 /// Hijacks the calling thread and initializes the winit event loop with the provided closure.
 /// Since the closure is 'static, it must be a move closure if it needs to access any data from the calling context.
-/// See the ControlFlow docs for information on how changes to &mut ControlFlow impact the event loop's behavior.
+/// The callback's return value controls the event loop after each dispatched event.
 /// Any values not passed to this function will not be dropped.
 #[no_mangle]
 pub extern "C" fn winit_event_loop_run_data(
@@ -99,11 +112,60 @@ pub extern "C" fn winit_event_loop_run_data(
         .take_value()
         .map(|event_loop| {
             let mut event_processor = EventProcessor::new();
-            event_loop.run(
-                move |event,
-                      _events_loop: &EventLoopWindowTarget<WinitUserEvent>,
-                      control_flow: &mut ControlFlow| {
-                    control_flow.set_wait();
+            let mut exit_requested = false;
+            let event_loop_windows = Arc::clone(&event_loop.windows);
+            event_loop.event_loop.run(
+                move |event, event_loop| {
+                    event_loop.set_control_flow(ControlFlow::Wait);
+                    if matches!(&event, winit::event::Event::UserEvent(WinitUserEvent::Exit)) {
+                        exit_requested = true;
+                        let no_windows = event_loop_windows
+                            .lock()
+                            .map(|windows| windows.is_empty())
+                            .unwrap_or(false);
+                        if no_windows {
+                            event_loop.exit();
+                        }
+                        return;
+                    }
+                    let destroyed = matches!(
+                        &event,
+                        winit::event::Event::WindowEvent {
+                            event: winit::event::WindowEvent::Destroyed,
+                            ..
+                        }
+                    );
+                    if let winit::event::Event::WindowEvent { window_id, .. } = &event {
+                        if destroyed {
+                            let _ = event_loop_windows.lock().map(|mut windows| windows.remove(window_id));
+                        }
+                    }
+                    let all_windows_destroyed = event_loop_windows
+                        .lock()
+                        .map(|windows| windows.is_empty())
+                        .unwrap_or(false);
+                    if let winit::event::Event::WindowEvent {
+                        window_id,
+                        event: winit::event::WindowEvent::Ime(winit::event::Ime::Commit(text)),
+                    } = &event
+                    {
+                        for c_event in
+                            winit_event_loop_process_ime_commit(window_id.clone(), text)
+                        {
+                            let c_event_ptr = Box::into_raw(Box::new(c_event));
+                            let c_control_flow = callback(data, c_event_ptr);
+                            unsafe {
+                                let _ = Box::from_raw(c_event_ptr);
+                            }
+                            apply_control_flow(
+                                event_loop,
+                                c_control_flow,
+                                &mut exit_requested,
+                                false,
+                            );
+                        }
+                        return;
+                    }
                     let mut c_event: WinitEvent = Default::default();
                     let processed = event_processor.process(event, &mut c_event);
                     if processed {
@@ -113,7 +175,16 @@ pub extern "C" fn winit_event_loop_run_data(
                             let _ = Box::from_raw(c_event_ptr);
                         };
 
-                        *control_flow = c_control_flow.into();
+                        apply_control_flow(
+                            event_loop,
+                            c_control_flow,
+                            &mut exit_requested,
+                            destroyed && all_windows_destroyed,
+                        );
+                    }
+
+                    if exit_requested && destroyed && all_windows_destroyed {
+                        event_loop.exit();
                     }
                 },
             )
@@ -121,12 +192,30 @@ pub extern "C" fn winit_event_loop_run_data(
         .log();
 }
 
+fn apply_control_flow(
+    active: &ActiveEventLoop,
+    flow: WinitControlFlow,
+    exit_requested: &mut bool,
+    destroyed: bool,
+) {
+    match flow {
+        WinitControlFlow::Poll => active.set_control_flow(ControlFlow::Poll),
+        WinitControlFlow::Wait => active.set_control_flow(ControlFlow::Wait),
+        WinitControlFlow::Exit => {
+            *exit_requested = true;
+            if destroyed {
+                active.exit();
+            }
+        }
+    }
+}
+
 #[no_mangle]
 pub extern "C" fn winit_event_loop_create_proxy(
     event_loop: *mut ValueBox<WinitEventLoop>,
 ) -> *mut ValueBox<WinitEventLoopProxy> {
     event_loop
-        .with_ref_ok(|event_loop| value_box!(event_loop.create_proxy()))
+        .with_ref_ok(|event_loop| value_box!(WinitEventLoopProxy(event_loop.event_loop.create_proxy())))
         .into_raw()
 }
 
@@ -135,6 +224,19 @@ pub extern "C" fn winit_event_loop_drop_proxy(
     event_loop_proxy: *mut ValueBox<WinitEventLoopProxy>,
 ) {
     event_loop_proxy.release();
+}
+
+/// Requests the event loop to exit through an event-loop proxy.
+///
+/// The request is deferred until all registered windows have delivered their
+/// `Destroyed` event. This function is safe to call from another thread.
+#[no_mangle]
+pub extern "C" fn winit_event_loop_exit(
+    event_loop_proxy: *mut ValueBox<WinitEventLoopProxy>,
+) -> bool {
+    event_loop_proxy
+        .with_ref_ok(|proxy| proxy.0.send_event(WinitUserEvent::Exit).is_ok())
+        .or_log(false)
 }
 
 ///////////////////////////////////////////////////////////////////////////////////////
@@ -146,13 +248,17 @@ pub extern "C" fn winit_event_loop_get_primary_monitor(
     event_loop: *mut ValueBox<WinitEventLoop>,
 ) -> *mut ValueBox<MonitorHandle> {
     event_loop
-        .with_ref(|event_loop| {
+        .with_ref_ok(|event_loop| {
             event_loop
-                .primary_monitor()
-                .map(|monitor| value_box!(monitor))
-                .ok_or_else(
-                    || BoxerError::AnyError("There is no monitor, or it is not supported".into())
-                )
+                .primary_monitor
+                .lock()
+                .ok()
+                .and_then(|monitor| monitor.clone())
         })
-        .into_raw()
+        .map(|monitor| {
+            monitor
+                .map(|monitor| ValueBox::new(monitor).into_raw())
+                .unwrap_or(std::ptr::null_mut())
+        })
+        .or_log(std::ptr::null_mut())
 }

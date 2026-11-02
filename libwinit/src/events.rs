@@ -4,7 +4,8 @@ use std::mem::transmute;
 use geometry_box::U128Box;
 use winit::dpi::{PhysicalPosition, PhysicalSize};
 use winit::event::*;
-use winit::event_loop::ControlFlow;
+use winit::keyboard::PhysicalKey;
+use winit::window::WindowId;
 
 use crate::{winit_convert_window_id, WinitUserEvent};
 
@@ -94,10 +95,9 @@ pub struct WinitWindowFocusedEvent {
 #[repr(C)]
 pub struct WinitEventKeyboardInput {
     device_id: i64,
-    scan_code: u32,
     state: WinitEventInputElementState,
-    has_virtual_keycode: bool,
-    virtual_keycode: VirtualKeyCode,
+    has_physical_keycode: bool,
+    physical_keycode: u32,
     is_synthetic: bool,
 }
 
@@ -105,10 +105,9 @@ impl Default for WinitEventKeyboardInput {
     fn default() -> Self {
         WinitEventKeyboardInput {
             device_id: Default::default(),
-            scan_code: Default::default(),
             state: Default::default(),
-            has_virtual_keycode: Default::default(),
-            virtual_keycode: VirtualKeyCode::Unlabeled,
+            has_physical_keycode: Default::default(),
+            physical_keycode: Default::default(),
             is_synthetic: false,
         }
     }
@@ -272,16 +271,6 @@ pub enum WinitControlFlow {
     Exit,
 }
 
-impl From<WinitControlFlow> for ControlFlow {
-    fn from(control_flow: WinitControlFlow) -> Self {
-        match control_flow {
-            WinitControlFlow::Poll => ControlFlow::Poll,
-            WinitControlFlow::Wait => ControlFlow::Wait,
-            WinitControlFlow::Exit => ControlFlow::Exit,
-        }
-    }
-}
-
 impl Default for WinitEventInputElementState {
     fn default() -> Self {
         WinitEventInputElementState::Unknown
@@ -293,7 +282,7 @@ impl Default for WinitEventInputElementState {
 ///////////////////////////////////////////////////////////////////////////////////////
 
 pub struct EventProcessor {
-    pub key_buffer: HashMap<ScanCode, VirtualKeyCode>,
+    pub key_buffer: HashMap<u32, u32>,
 }
 
 impl EventProcessor {
@@ -328,14 +317,9 @@ impl EventProcessor {
                             result = false
                         }
                     }
-                    WindowEvent::ScaleFactorChanged {
-                        scale_factor,
-                        new_inner_size,
-                    } => {
+                    WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
                         c_event.event_type = WinitEventType::WindowEventScaleFactorChanged;
                         c_event.scale_factor.scale_factor = scale_factor;
-                        c_event.scale_factor.width = new_inner_size.width;
-                        c_event.scale_factor.height = new_inner_size.height;
                     }
                     WindowEvent::Focused(is_focused) => {
                         c_event.event_type = WinitEventType::WindowEventFocused;
@@ -392,51 +376,46 @@ impl EventProcessor {
                     }
                     WindowEvent::KeyboardInput {
                         device_id,
-                        input,
+                        event,
                         is_synthetic,
                     } => {
-                        self.process_keyboard_input(c_event, device_id, input, is_synthetic);
-                    }
-                    WindowEvent::ReceivedCharacter(character) => {
-                        winit_event_loop_process_received_character(c_event, character);
+                        self.process_keyboard_input(c_event, device_id, event, is_synthetic);
                     }
                     WindowEvent::ModifiersChanged(modifiers) => {
                         c_event.event_type = WinitEventType::ModifiersChanged;
-                        c_event.modifiers.alt = modifiers.alt();
-                        c_event.modifiers.ctrl = modifiers.ctrl();
-                        c_event.modifiers.logo = modifiers.logo();
-                        c_event.modifiers.shift = modifiers.shift();
+                        let state = modifiers.state();
+                        c_event.modifiers.alt = state.alt_key();
+                        c_event.modifiers.ctrl = state.control_key();
+                        c_event.modifiers.logo = state.super_key();
+                        c_event.modifiers.shift = state.shift_key();
                     }
                     WindowEvent::DroppedFile(_) => {}
                     WindowEvent::HoveredFile(_) => {}
                     WindowEvent::HoveredFileCancelled => {}
-                    WindowEvent::Ime(_) => {}
-                    WindowEvent::TouchpadMagnify { .. } => {}
-                    WindowEvent::TouchpadRotate { .. } => {}
+                    WindowEvent::Ime(_) => result = false,
+                    WindowEvent::PinchGesture { .. } => {}
+                    WindowEvent::RotationGesture { .. } => {}
+                    WindowEvent::PanGesture { .. } => {}
+                    WindowEvent::DoubleTapGesture { .. } => {}
                     WindowEvent::TouchpadPressure { .. } => {}
                     WindowEvent::AxisMotion { .. } => {}
                     WindowEvent::ThemeChanged(_) => {}
                     WindowEvent::Occluded(_) => {}
-                    WindowEvent::SmartMagnify { .. } => {}
+                    WindowEvent::ActivationTokenDone { .. } => {}
+                    WindowEvent::RedrawRequested => {
+                        c_event.event_type = WinitEventType::RedrawRequested;
+                    }
                 }
             }
 
             Event::NewEvents(_start_cause) => {
                 c_event.event_type = WinitEventType::NewEvents;
             }
-            Event::MainEventsCleared => {
+            Event::AboutToWait => {
                 c_event.event_type = WinitEventType::MainEventsCleared;
             }
-            Event::RedrawEventsCleared => {
-                c_event.event_type = WinitEventType::RedrawEventsCleared;
-            }
-            Event::LoopDestroyed => {
+            Event::LoopExiting => {
                 c_event.event_type = WinitEventType::LoopDestroyed;
-            }
-            Event::RedrawRequested(window_id) => {
-                c_event.event_type = WinitEventType::RedrawRequested;
-                let id: U128Box = winit_convert_window_id(window_id);
-                c_event.window_id.clone_from(&id);
             }
             Event::Suspended => {
                 c_event.event_type = WinitEventType::Suspended;
@@ -452,6 +431,7 @@ impl EventProcessor {
                 device_id: _,
                 event: _,
             } => result = false,
+            Event::MemoryWarning => result = false,
         }
         result
     }
@@ -460,13 +440,17 @@ impl EventProcessor {
         &mut self,
         c_event: &mut WinitEvent,
         device_id: DeviceId,
-        input: KeyboardInput,
+        input: KeyEvent,
         is_synthetic: bool,
     ) {
         c_event.event_type = WinitEventType::WindowEventKeyboardInput;
         c_event.keyboard_input.device_id = unsafe { transmute(&device_id) };
         c_event.keyboard_input.is_synthetic = is_synthetic;
-        c_event.keyboard_input.scan_code = input.scancode;
+        let scan_code = match input.physical_key {
+            PhysicalKey::Code(code) => code as u32,
+            PhysicalKey::Unidentified(_) => 0,
+        };
+        c_event.keyboard_input.physical_keycode = scan_code;
 
         match input.state {
             ElementState::Pressed => {
@@ -478,29 +462,30 @@ impl EventProcessor {
         }
 
         let key_code = match input.state {
-            ElementState::Pressed => match input.virtual_keycode {
-                None => None,
-                Some(code) => match self.key_buffer.get(&input.scancode) {
+            ElementState::Pressed => match input.physical_key {
+                PhysicalKey::Code(code) => match self.key_buffer.get(&scan_code) {
                     None => {
-                        (&mut self.key_buffer).insert(input.scancode, code);
-                        Some(code)
+                        (&mut self.key_buffer).insert(scan_code, code as u32);
+                        Some(code as u32)
                     }
-                    Some(code) => Some(code.clone()),
+                    Some(code) => Some(*code),
                 },
+                PhysicalKey::Unidentified(_) => None,
             },
-            ElementState::Released => match self.key_buffer.remove(&input.scancode) {
-                None => input.virtual_keycode,
+            ElementState::Released => match self.key_buffer.remove(&scan_code) {
+                None => match input.physical_key { PhysicalKey::Code(code) => Some(code as u32), _ => None },
                 Some(code) => Some(code),
             },
         };
 
         match key_code {
             Some(code) => {
-                c_event.keyboard_input.has_virtual_keycode = true;
-                c_event.keyboard_input.virtual_keycode = code;
+                c_event.keyboard_input.has_physical_keycode = true;
+                c_event.keyboard_input.physical_keycode = code;
             }
             None => {
-                c_event.keyboard_input.has_virtual_keycode = false;
+                c_event.keyboard_input.has_physical_keycode = false;
+                c_event.keyboard_input.physical_keycode = 0;
             }
         }
     }
@@ -608,6 +593,10 @@ fn winit_event_loop_process_mouse_input(
             c_event.mouse_input.button.button_type = WinitEventMouseButtonType::Other;
             c_event.mouse_input.button.button_code = code;
         }
+        MouseButton::Back | MouseButton::Forward => {
+            c_event.mouse_input.button.button_type = WinitEventMouseButtonType::Other;
+            c_event.mouse_input.button.button_code = 0;
+        }
     }
 }
 
@@ -657,6 +646,21 @@ pub(crate) fn winit_event_loop_process_received_character(
     if length >= 4 {
         c_event.received_character.byte_4 = bytes[3];
     }
+}
+
+pub(crate) fn winit_event_loop_process_ime_commit(
+    window_id: WindowId,
+    text: &str,
+) -> Vec<WinitEvent> {
+    let id: U128Box = winit_convert_window_id(window_id);
+    text.chars()
+        .map(|character| {
+            let mut c_event = WinitEvent::default();
+            c_event.window_id.clone_from(&id);
+            winit_event_loop_process_received_character(&mut c_event, character);
+            c_event
+        })
+        .collect()
 }
 
 #[no_mangle]

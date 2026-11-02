@@ -53,7 +53,7 @@ mod ffi;
 mod monitor;
 mod polling_event_loop;
 mod window;
-mod window_builder;
+mod window_attributes;
 mod window_ref;
 
 #[cfg(feature = "phlow")]

@@ -1,5 +1,5 @@
 use std::borrow::{Borrow, BorrowMut};
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::ffi::c_void;
 use std::sync::Arc;
 
@@ -8,7 +8,7 @@ use parking_lot::Mutex;
 use value_box::{BoxerError, ReturnBoxerResult};
 use winit::dpi::PhysicalSize;
 use winit::event::{Event, Ime, WindowEvent};
-use winit::event_loop::{ControlFlow, EventLoop, EventLoopProxy, EventLoopWindowTarget};
+use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 #[cfg(android_platform)]
 use winit::platform::android::EventLoopBuilderExtAndroid;
 #[cfg(target_os = "ios")]
@@ -17,16 +17,15 @@ use winit::platform::ios::WindowBuilderExtIOS;
 use winit::platform::macos::EventLoopBuilderExtMacOS;
 #[cfg(windows_platform)]
 use winit::platform::windows::EventLoopBuilderExtWindows;
-use winit::window::{Window, WindowBuilder, WindowId};
+use winit::window::{Window, WindowId};
 
-use crate::event_loop::{WinitEventLoopBuilder, WinitEventLoopType};
+use crate::event_loop::{WinitEventLoop, WinitEventLoopProxy, WinitEventLoopType};
 use crate::events::{
     winit_event_loop_process_received_character, EventProcessor, WinitEvent, WinitEventType,
 };
 use crate::{winit_convert_window_id, Result, WindowRef, WinitError, WinitUserEvent};
+use crate::window_attributes::WindowAttributes;
 
-pub type WinitEventLoop = EventLoop<WinitUserEvent>;
-pub type WinitEventLoopProxy = EventLoopProxy<WinitUserEvent>;
 
 #[derive(Debug)]
 pub struct SemaphoreSignaller {
@@ -117,13 +116,14 @@ impl WindowResizedListener {
 #[derive(Debug)]
 pub struct PollingEventLoop {
     windows: Mutex<HashMap<WindowId, (WindowRef, Window)>>,
+    destroying_windows: Mutex<HashSet<WindowId>>,
     events: Mutex<VecDeque<WinitEvent>>,
     pub(crate) event_loop_waker: WinitEventLoopWaker,
     semaphore_signaller: Option<SemaphoreSignaller>,
     main_events_cleared_signallers: Mutex<Vec<MainEventClearedSignaller>>,
     window_redraw_listeners: Mutex<HashMap<WindowId, WindowRedrawRequestedListener>>,
     window_resize_listeners: Mutex<HashMap<WindowId, WindowResizedListener>>,
-    pub(crate) running_event_loop: *const EventLoopWindowTarget<WinitUserEvent>,
+    pub(crate) running_event_loop: *const ActiveEventLoop,
     #[cfg(target_os = "android")]
     android_app: Option<winit::platform::android::activity::AndroidApp>,
 }
@@ -132,6 +132,7 @@ impl PollingEventLoop {
     pub fn new() -> Self {
         Self {
             windows: Default::default(),
+            destroying_windows: Default::default(),
             events: Mutex::new(VecDeque::new()),
             event_loop_waker: WinitEventLoopWaker::new(),
             semaphore_signaller: None,
@@ -294,25 +295,11 @@ impl PollingEventLoop {
     }
 
     /// Create and register a window in the event loop
-    pub fn create_window(&mut self, window_builder: WindowBuilder) -> Result<WindowRef> {
+    pub fn create_window(&mut self, window_attributes: WindowAttributes) -> Result<WindowRef> {
         self.event_loop()
             .ok_or(WinitError::EventLoopNotRunning)
             .and_then(|event_loop| {
-                (if let Some(_monitor) = event_loop.primary_monitor() {
-                    #[cfg(target_os = "ios")]
-                    {
-                        window_builder
-                            .with_inner_size(_monitor.size())
-                            .with_scale_factor(_monitor.scale_factor())
-                    }
-                    #[cfg(not(target_os = "ios"))]
-                    {
-                        window_builder
-                    }
-                } else {
-                    window_builder
-                })
-                .build(event_loop)
+                event_loop.create_window(window_attributes.attributes)
                 .map_err(|err| err.into())
             })
             .and_then(|window| {
@@ -364,6 +351,7 @@ impl PollingEventLoop {
         self.window_redraw_listeners.lock().remove(window_id);
 
         if let Some(window) = self.windows.lock().remove(window_id) {
+            self.destroying_windows.lock().insert(window_id.clone());
             drop(window);
             info!("Closed window with id {:?}", window_id);
             Ok(())
@@ -375,8 +363,9 @@ impl PollingEventLoop {
 
     pub fn run(&'static mut self) {
         let mut event_processor = EventProcessor::new();
+        let mut exit_requested = false;
 
-        let mut event_loop_builder = WinitEventLoopBuilder::with_user_event();
+        let mut event_loop_builder = winit::event_loop::EventLoop::with_user_event();
         #[cfg(android_platform)]
         event_loop_builder.with_android_app(
             self.android_app
@@ -392,25 +381,38 @@ impl PollingEventLoop {
         #[cfg(macos_platform)]
         event_loop_builder.with_default_menu(false);
 
-        let event_loop = event_loop_builder.build();
-        self.event_loop_waker.proxy(event_loop.create_proxy());
+        let event_loop = event_loop_builder
+            .build()
+            .expect("failed to create winit event loop");
+        self.event_loop_waker.proxy(WinitEventLoopProxy(event_loop.create_proxy()));
 
-        event_loop.run(move |event, event_loop, control_flow: &mut ControlFlow| {
-            self.running_event_loop = event_loop as *const EventLoopWindowTarget<WinitUserEvent>;
-            *control_flow = ControlFlow::Wait;
+        event_loop.run(move |event, event_loop| {
+            self.running_event_loop = event_loop as *const ActiveEventLoop;
+            event_loop.set_control_flow(ControlFlow::Wait);
 
             trace!("{:?}", &event);
 
             let result = match &event {
+                Event::UserEvent(WinitUserEvent::Exit) => {
+                    exit_requested = true;
+                    Ok(debug!("Received event loop exit request"))
+                }
                 Event::UserEvent(value) => Ok(debug!("Received UserEvent({:?})", value)),
-                Event::RedrawRequested(window_id) => self.on_redraw_requested(window_id),
                 Event::WindowEvent { window_id, event } => {
                     match event {
+                        WindowEvent::RedrawRequested => self.on_redraw_requested(window_id),
+                        WindowEvent::Destroyed => {
+                            self.windows.lock().remove(window_id);
+                            self.destroying_windows.lock().remove(window_id);
+                            Ok(())
+                        }
                         WindowEvent::Resized(size) => self.on_window_resized(window_id, size),
-                        WindowEvent::ScaleFactorChanged {
-                            scale_factor,
-                            new_inner_size,
-                        } => self.on_window_scale_changed(window_id, scale_factor, new_inner_size),
+                        WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
+                            self.with_window(window_id, |window| Ok(window.inner_size()))
+                                .and_then(|size| {
+                                    self.on_window_scale_changed(window_id, scale_factor, &size)
+                                })
+                        }
                         WindowEvent::Ime(ime) => {
                             match ime {
                                 Ime::Enabled => {}
@@ -441,6 +443,13 @@ impl PollingEventLoop {
 
             result.map_err(|error| BoxerError::from(error)).log();
 
+            if exit_requested
+                && self.windows.lock().is_empty()
+                && self.destroying_windows.lock().is_empty()
+            {
+                event_loop.exit();
+            }
+
             let mut c_event = WinitEvent::default();
             let processed = event_processor.process(event, &mut c_event);
             if processed {
@@ -459,15 +468,16 @@ impl PollingEventLoop {
                     self.signal_main_events_cleared();
                 }
             }
-            self.running_event_loop = std::ptr::null_mut();
+            self.running_event_loop = std::ptr::null();
         })
+        .expect("winit event loop exited unexpectedly")
     }
 
     pub fn wake(&self, event: WinitUserEvent) -> Result<()> {
         self.event_loop_waker.wake(event)
     }
 
-    pub fn event_loop(&self) -> Option<&EventLoopWindowTarget<WinitUserEvent>> {
+    pub fn event_loop(&self) -> Option<&ActiveEventLoop> {
         if self.running_event_loop.is_null() {
             None
         } else {
@@ -526,7 +536,7 @@ impl WinitEventLoopWaker {
     pub fn wake(&self, event: WinitUserEvent) -> Result<()> {
         match self.proxy.lock().borrow().as_ref() {
             None => Ok(()),
-            Some(proxy) => proxy.send_event(event).map_err(|err| err.into()),
+            Some(proxy) => proxy.0.send_event(event).map_err(|err| err.into()),
         }
     }
 }

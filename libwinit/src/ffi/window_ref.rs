@@ -1,4 +1,4 @@
-use raw_window_handle::{HasRawDisplayHandle, HasRawWindowHandle};
+use raw_window_handle::{HasRawDisplayHandle, HasRawWindowHandle, RawWindowHandle};
 use winit::dpi::{PhysicalPosition, PhysicalSize};
 #[cfg(target_os = "ios")]
 use winit::platform::ios::WindowExtIOS;
@@ -136,7 +136,7 @@ pub extern "C" fn winit_window_ref_set_inner_size(
         window_ref
             .set_inner_size(new_size)
             .map_err(|err| err.boxed().into())
-            .map(|_| window.set_inner_size(new_size.clone()))
+            .map(|_| window.request_inner_size(new_size.clone()))
     })
     .log();
 }
@@ -291,7 +291,10 @@ pub extern "C" fn winit_window_ref_get_hwnd(
     window_ref: *mut ValueBox<WindowRef>,
 ) -> *mut std::ffi::c_void {
     with_window(event_loop, window_ref, |window, _event_loop| {
-        Ok(unsafe { std::mem::transmute(window.hwnd()) })
+        match window.raw_window_handle() {
+            RawWindowHandle::Win32(handle) => Ok(handle.hwnd as *mut std::ffi::c_void),
+            _ => Ok(std::ptr::null_mut()),
+        }
     })
     .or_log(std::ptr::null_mut())
 }
@@ -380,6 +383,20 @@ pub extern "C" fn winit_window_ref_current_monitor(
     with_window(event_loop, window_ref, |window, _event_loop| {
         Ok(window
             .current_monitor()
+            .map(|monitor| ValueBox::new(monitor).into_raw())
+            .unwrap_or(std::ptr::null_mut()))
+    })
+    .or_log(std::ptr::null_mut())
+}
+
+#[no_mangle]
+pub extern "C" fn winit_window_ref_primary_monitor(
+    event_loop: *mut ValueBox<PollingEventLoop>,
+    window_ref: *mut ValueBox<WindowRef>,
+) -> *mut ValueBox<MonitorHandle> {
+    with_window(event_loop, window_ref, |window, _event_loop| {
+        Ok(window
+            .primary_monitor()
             .map(|monitor| ValueBox::new(monitor).into_raw())
             .unwrap_or(std::ptr::null_mut()))
     })

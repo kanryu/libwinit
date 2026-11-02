@@ -1,5 +1,5 @@
 use geometry_box::{PointBox, SizeBox, U128Box};
-use raw_window_handle::{HasRawDisplayHandle, HasRawWindowHandle};
+use raw_window_handle::{HasRawDisplayHandle, HasRawWindowHandle, RawWindowHandle};
 use raw_window_handle_extensions::{VeryRawDisplayHandle, VeryRawWindowHandle};
 use string_box::StringBox;
 use value_box::{ReturnBoxerResult, ValueBox, ValueBoxIntoRaw, ValueBoxPointer};
@@ -18,24 +18,34 @@ use winit::platform::windows::WindowExtWindows;
 ))]
 use winit::platform::x11::WindowExtX11;
 use winit::window::Window;
-use winit::window::WindowBuilder;
 
 use crate::enums::WinitCursorIcon;
 use crate::event_loop::WinitEventLoop;
+use crate::window_attributes::WindowAttributes;
 use crate::{winit_convert_window_id, WinitError};
 
 #[no_mangle]
 pub extern "C" fn winit_create_window(
     event_loop: *mut ValueBox<WinitEventLoop>,
-    window_builder: *mut ValueBox<WindowBuilder>,
+    window_attributes: *mut ValueBox<WindowAttributes>,
 ) -> *mut ValueBox<Window> {
     event_loop
         .with_ref(|event_loop| {
-            window_builder.take_value().and_then(|window_builder| {
-                debug!("Window builder: {:?}", &window_builder);
-                window_builder
-                    .build(&event_loop)
-                    .map(|window| value_box!(window))
+            window_attributes.take_value().and_then(|window_attributes| {
+                debug!("Window attributes: {:?}", &window_attributes);
+                event_loop.event_loop
+                    .create_window(window_attributes.attributes)
+                    .map(|window| {
+                        if let Some(monitor) = window.primary_monitor() {
+                            if let Ok(mut primary_monitor) = event_loop.primary_monitor.lock() {
+                                *primary_monitor = Some(monitor);
+                            }
+                        }
+                        if let Ok(mut windows) = event_loop.windows.lock() {
+                            windows.insert(window.id());
+                        }
+                        value_box!(window)
+                    })
                     .map_err(|error| Into::<WinitError>::into(error).into())
             })
         })
@@ -99,7 +109,7 @@ pub extern "C" fn winit_window_set_inner_size(
     height: u32,
 ) {
     window
-        .with_ref_ok(|window| window.set_inner_size(PhysicalSize::new(width, height)))
+        .with_ref_ok(|window| window.request_inner_size(PhysicalSize::new(width, height)))
         .log();
 }
 
@@ -186,7 +196,10 @@ pub extern "C" fn winit_window_get_hwnd(
     window_ptr: *mut ValueBox<Window>,
 ) -> *mut std::ffi::c_void {
     window_ptr
-        .with_ref_ok(|window| unsafe { std::mem::transmute(window.hwnd()) })
+        .with_ref_ok(|window| match window.raw_window_handle() {
+            RawWindowHandle::Win32(handle) => handle.hwnd as *mut std::ffi::c_void,
+            _ => std::ptr::null_mut(),
+        })
         .or_log(std::ptr::null_mut())
 }
 
@@ -236,6 +249,20 @@ pub extern "C" fn winit_window_current_monitor(
         .with_ref_ok(|window| {
             window
                 .current_monitor()
+                .map(|monitor| ValueBox::new(monitor).into_raw())
+                .unwrap_or(std::ptr::null_mut())
+        })
+        .or_log(std::ptr::null_mut())
+}
+
+#[no_mangle]
+pub extern "C" fn winit_window_primary_monitor(
+    window: *mut ValueBox<Window>,
+) -> *mut ValueBox<MonitorHandle> {
+    window
+        .with_ref_ok(|window| {
+            window
+                .primary_monitor()
                 .map(|monitor| ValueBox::new(monitor).into_raw())
                 .unwrap_or(std::ptr::null_mut())
         })

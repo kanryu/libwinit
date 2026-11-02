@@ -2,7 +2,7 @@ use std::ffi::c_void;
 use std::mem::transmute;
 
 use value_box::{ReturnBoxerResult, ValueBox, ValueBoxIntoRaw, ValueBoxPointer};
-use winit::window::{WindowBuilder, WindowId};
+use winit::window::WindowId;
 
 use crate::event_loop::WinitEventLoopType;
 use crate::events::WinitEvent;
@@ -10,6 +10,7 @@ use crate::{
     PollingEventLoop, WindowRedrawRequestedListener, WindowRef, WindowResizedListener,
     WinitEventLoopWaker, WinitUserEvent,
 };
+use crate::window_attributes::WindowAttributes;
 
 #[no_mangle]
 pub extern "C" fn winit_waker_wake(waker: *const c_void, event: WinitUserEvent) -> bool {
@@ -60,16 +61,26 @@ pub extern "C" fn winit_polling_event_loop_wake(
         .or_log(false)
 }
 
+/// Requests the polling event loop to exit asynchronously.
+#[no_mangle]
+pub extern "C" fn winit_polling_event_loop_exit(
+    event_loop: *mut ValueBox<PollingEventLoop>,
+) -> bool {
+    event_loop
+        .with_ref_ok(|event_loop| event_loop.wake(WinitUserEvent::Exit).is_ok())
+        .or_log(false)
+}
+
 #[no_mangle]
 pub extern "C" fn winit_polling_event_loop_create_window(
     event_loop: *mut ValueBox<PollingEventLoop>,
-    window_builder: *mut ValueBox<WindowBuilder>,
+    window_attributes: *mut ValueBox<WindowAttributes>,
 ) -> *mut ValueBox<WindowRef> {
     event_loop
         .with_mut(|event_loop| {
-            window_builder.take_value().and_then(|window_builder| {
+            window_attributes.take_value().and_then(|window_attributes| {
                 event_loop
-                    .create_window(window_builder)
+                    .create_window(window_attributes)
                     .map_err(|err| err.boxed().into())
             })
         })
