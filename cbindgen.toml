@@ -22,6 +22,8 @@ includes = [ ]
 no_includes = false
 after_includes = """
 typedef struct String String;
+struct StringBox *boxer_string_from_byte_string(const uint8_t *data, size_t length);
+void boxer_string_drop(struct StringBox *string_box);
 typedef struct MonitorHandle MonitorHandle;
 typedef struct WindowId WindowId;
 typedef struct Window Window;

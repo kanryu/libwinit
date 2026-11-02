@@ -15,6 +15,8 @@ WinitControlFlow process_event(void* data, WinitEvent* event) {
     UserData* user_data = (UserData*) data;
 
     if (event -> event_type == WinitEventType_WindowEventCloseRequested) {
+        winit_window_drop(user_data -> window);
+        user_data -> window = NULL;
         return WinitControlFlow_Exit;
     }
 
@@ -37,31 +39,32 @@ WinitControlFlow process_event(void* data, WinitEvent* event) {
     return WinitControlFlow_Wait;
 }
 
-void with_title(WindowBuilder* window_builder, char* title) {
+void with_title(WindowAttributes* window_attributes, char* title) {
     StringBox* title_string = boxer_string_from_byte_string((uint8_t*) title, strlen(title));
-    winit_window_builder_with_title(window_builder, title_string);
+    winit_window_attributes_with_title(window_attributes, title_string);
     boxer_string_drop(title_string);
 }
 
 int main() {
     EventLoop* event_loop = winit_event_loop_new();
 
-    WindowBuilder* window_builder = winit_window_builder_new();
-    with_title(window_builder, "Hello World");
+    WindowAttributes* window_attributes = winit_window_attributes_new();
+    with_title(window_attributes, "Hello World");
     // Default logical window size
-    winit_window_builder_with_dimensions(window_builder, 600.0, 400.0);
+    winit_window_attributes_with_dimensions(window_attributes, 600.0, 400.0);
 
-    Window* window = winit_create_window(event_loop, window_builder);
-    // don't forget to drop the window builder!
-    winit_window_builder_drop(window_builder);
+    Window* window = winit_create_window(event_loop, window_attributes);
+    // Creating a window consumes the attributes object.
 
     struct UserData user_data;
     user_data.window = window;
 
-    // run the event loop, will continue if `process_event` returns WinitControlFlow_Exit
-    winit_event_loop_run_return_data(event_loop, (void*)&user_data, process_event);
+    // Run until the window has received its Destroyed event.
+    winit_event_loop_run_data(event_loop, (void*)&user_data, process_event);
 
-    winit_window_drop(window);
+    if (user_data.window != NULL) {
+        winit_window_drop(user_data.window);
+    }
     winit_event_loop_drop(event_loop);
 
     return 0;
