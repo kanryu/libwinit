@@ -1,5 +1,5 @@
 use geometry_box::{PointBox, SizeBox, U128Box};
-use raw_window_handle::{HasRawDisplayHandle, HasRawWindowHandle, RawWindowHandle};
+use raw_window_handle::{HasRawDisplayHandle, HasRawWindowHandle, RawDisplayHandle, RawWindowHandle};
 use raw_window_handle_extensions::{VeryRawDisplayHandle, VeryRawWindowHandle};
 use string_box::StringBox;
 use value_box::{ReturnBoxerResult, ValueBox, ValueBoxIntoRaw, ValueBoxPointer};
@@ -36,6 +36,8 @@ pub extern "C" fn winit_create_window(
                 event_loop.event_loop
                     .create_window(window_attributes.attributes)
                     .map(|window| {
+                        window.set_visible(true);
+                        window.request_redraw();
                         if let Some(monitor) = window.primary_monitor() {
                             if let Ok(mut primary_monitor) = event_loop.primary_monitor.lock() {
                                 *primary_monitor = Some(monitor);
@@ -186,6 +188,21 @@ pub extern "C" fn winit_window_set_maximized(window: *mut ValueBox<Window>, maxi
 }
 
 #[no_mangle]
+pub extern "C" fn winit_window_set_ime_allowed(
+    window: *mut ValueBox<Window>,
+    allowed: bool,
+) {
+    window
+        .with_ref_ok(|window| window.set_ime_allowed(allowed))
+        .log();
+}
+
+#[no_mangle]
+pub extern "C" fn winit_window_is_maximized(window: *mut ValueBox<Window>) -> bool {
+    window.with_ref_ok(|window| window.is_maximized()).or_log(false)
+}
+
+#[no_mangle]
 pub extern "C" fn winit_window_focus_window(window: *mut ValueBox<Window>) {
     window.with_ref_ok(|window| window.focus_window()).log();
 }
@@ -223,7 +240,10 @@ pub extern "C" fn winit_window_get_xlib_display(
     window: *mut ValueBox<Window>,
 ) -> *mut std::ffi::c_void {
     window
-        .with_ref_ok(|window| window.xlib_display().unwrap_or(std::ptr::null_mut()))
+        .with_ref_ok(|window| match window.raw_display_handle() {
+            RawDisplayHandle::Xlib(handle) => handle.display,
+            _ => std::ptr::null_mut(),
+        })
         .or_log(std::ptr::null_mut())
 }
 
@@ -237,7 +257,10 @@ pub extern "C" fn winit_window_get_xlib_display(
 #[no_mangle]
 pub extern "C" fn winit_window_get_xlib_window(window: *mut ValueBox<Window>) -> std::ffi::c_ulong {
     window
-        .with_ref_ok(|window| window.xlib_window().unwrap_or(0))
+        .with_ref_ok(|window| match window.raw_window_handle() {
+            RawWindowHandle::Xlib(handle) => handle.window,
+            _ => 0,
+        })
         .or_log(0)
 }
 

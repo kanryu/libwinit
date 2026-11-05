@@ -487,8 +487,8 @@ impl PollingEventLoop {
 
     #[cfg(any(x11_platform, wayland_platform))]
     pub fn get_type(&self) -> WinitEventLoopType {
-        use winit::platform::wayland::EventLoopWindowTargetExtWayland;
-        use winit::platform::x11::EventLoopWindowTargetExtX11;
+        use winit::platform::wayland::ActiveEventLoopExtWayland;
+        use winit::platform::x11::ActiveEventLoopExtX11;
 
         if let Some(event_loop) = self.event_loop() {
             if event_loop.is_wayland() {

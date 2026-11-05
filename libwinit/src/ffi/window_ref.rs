@@ -1,4 +1,4 @@
-use raw_window_handle::{HasRawDisplayHandle, HasRawWindowHandle, RawWindowHandle};
+use raw_window_handle::{HasRawDisplayHandle, HasRawWindowHandle, RawDisplayHandle, RawWindowHandle};
 use winit::dpi::{PhysicalPosition, PhysicalSize};
 #[cfg(target_os = "ios")]
 use winit::platform::ios::WindowExtIOS;
@@ -306,14 +306,10 @@ pub extern "C" fn winit_window_ref_get_xlib_display(
     window_ref: *mut ValueBox<WindowRef>,
 ) -> *mut std::ffi::c_void {
     with_window(event_loop, window_ref, |window, event_loop| {
-        window.xlib_display().ok_or_else(|| {
-            format!(
-                "Window (id: {:?}, type: {:?}) does not support X11",
-                window.id(),
-                event_loop.get_type()
-            )
-            .into()
-        })
+        match window.raw_display_handle() {
+            RawDisplayHandle::Xlib(handle) => Ok(handle.display),
+            _ => Err(format!("Window (id: {:?}, type: {:?}) does not support X11", window.id(), event_loop.get_type()).into()),
+        }
     })
     .or_log(std::ptr::null_mut())
 }
@@ -325,14 +321,10 @@ pub extern "C" fn winit_window_ref_get_xlib_window(
     window_ref: *mut ValueBox<WindowRef>,
 ) -> std::ffi::c_ulong {
     with_window(event_loop, window_ref, |window, event_loop| {
-        window.xlib_window().ok_or_else(|| {
-            format!(
-                "Window (id: {:?}, type: {:?}) does not support X11",
-                window.id(),
-                event_loop.get_type()
-            )
-            .into()
-        })
+        match window.raw_window_handle() {
+            RawWindowHandle::Xlib(handle) => Ok(handle.window),
+            _ => Err(format!("Window (id: {:?}, type: {:?}) does not support X11", window.id(), event_loop.get_type()).into()),
+        }
     })
     .or_log(0)
 }
@@ -344,14 +336,10 @@ pub extern "C" fn winit_window_ref_get_wayland_surface(
     window_ref: *mut ValueBox<WindowRef>,
 ) -> *mut std::ffi::c_void {
     with_window(event_loop, window_ref, |window, event_loop| {
-        window.wayland_surface().ok_or_else(|| {
-            format!(
-                "Window (id: {:?}, type: {:?}) does not support Wayland",
-                window.id(),
-                event_loop.get_type()
-            )
-            .into()
-        })
+        match window.raw_window_handle() {
+            RawWindowHandle::Wayland(handle) => Ok(handle.surface),
+            _ => Err(format!("Window (id: {:?}, type: {:?}) does not support Wayland", window.id(), event_loop.get_type()).into()),
+        }
     })
     .or_log(std::ptr::null_mut())
 }
@@ -363,14 +351,10 @@ pub extern "C" fn winit_window_ref_get_wayland_display(
     window_ref: *mut ValueBox<WindowRef>,
 ) -> *mut std::ffi::c_void {
     with_window(event_loop, window_ref, |window, event_loop| {
-        window.wayland_display().ok_or_else(|| {
-            format!(
-                "Window (id: {:?}, type: {:?}) does not support Wayland",
-                window.id(),
-                event_loop.get_type()
-            )
-            .into()
-        })
+        match window.raw_display_handle() {
+            RawDisplayHandle::Wayland(handle) => Ok(handle.display),
+            _ => Err(format!("Window (id: {:?}, type: {:?}) does not support Wayland", window.id(), event_loop.get_type()).into()),
+        }
     })
     .or_log(std::ptr::null_mut())
 }

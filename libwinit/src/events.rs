@@ -24,6 +24,7 @@ pub struct WinitEvent {
     pub scale_factor: WinitWindowScaleFactorChangedEvent,
     pub window_moved: WinitWindowMovedEvent,
     pub window_focused: WinitWindowFocusedEvent,
+    pub window_occluded: WinitWindowOccludedEvent,
     pub modifiers: WinitEventModifiersState,
     pub user_event: WinitEventUserEvent,
 }
@@ -89,6 +90,12 @@ pub struct WinitWindowMovedEvent {
 #[repr(C)]
 pub struct WinitWindowFocusedEvent {
     is_focused: bool,
+}
+
+#[derive(Debug, Copy, Clone, Default)]
+#[repr(C)]
+pub struct WinitWindowOccludedEvent {
+    is_occluded: bool,
 }
 
 #[derive(Debug, Copy, Clone)]
@@ -211,6 +218,7 @@ pub enum WinitEventType {
     RedrawEventsCleared,
     ModifiersChanged,
     UserEvent,
+    WindowEventOccluded,
 }
 
 impl Default for WinitEventType {
@@ -324,6 +332,10 @@ impl EventProcessor {
                     WindowEvent::Focused(is_focused) => {
                         c_event.event_type = WinitEventType::WindowEventFocused;
                         c_event.window_focused.is_focused = is_focused;
+                    }
+                    WindowEvent::Occluded(is_occluded) => {
+                        c_event.event_type = WinitEventType::WindowEventOccluded;
+                        c_event.window_occluded.is_occluded = is_occluded;
                     }
                     WindowEvent::Moved(PhysicalPosition { x, y }) => {
                         c_event.event_type = WinitEventType::WindowEventMoved;

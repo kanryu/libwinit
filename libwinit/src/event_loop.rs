@@ -20,17 +20,24 @@ pub struct WinitEventLoopProxy(pub(crate) EventLoopProxy<WinitUserEvent>);
 
 #[no_mangle]
 pub extern "C" fn winit_event_loop_new() -> *mut ValueBox<WinitEventLoop> {
+    // Prefer X11 when a DISPLAY is available. It supports creating the
+    // initial window before the first active-event callback; callers can
+    // override this with WINIT_UNIX_BACKEND=wayland.
     #[cfg(target_os = "linux")]
+    if std::env::var_os("WINIT_UNIX_BACKEND").is_none()
+        && std::env::var_os("DISPLAY").is_some()
     {
-        // respect the winit backend if it is set
-        if std::env::var("WINIT_UNIX_BACKEND").is_err() {
-            std::env::set_var("WINIT_UNIX_BACKEND", "x11");
-        }
+        std::env::set_var("WINIT_UNIX_BACKEND", "x11");
     }
+    let event_loop = match EventLoop::with_user_event().build() {
+        Ok(event_loop) => event_loop,
+        Err(error) => {
+            eprintln!("failed to create winit event loop: {error}");
+            return std::ptr::null_mut();
+        }
+    };
     ValueBox::new(WinitEventLoop {
-        event_loop: EventLoop::with_user_event()
-            .build()
-            .expect("failed to create winit event loop"),
+        event_loop,
         windows: Arc::new(Mutex::new(HashSet::new())),
         primary_monitor: Arc::new(Mutex::new(None)),
     })
@@ -56,13 +63,13 @@ pub enum WinitEventLoopType {
 pub fn get_event_loop_type(
     _event_loop: &WinitEventLoop,
 ) -> WinitEventLoopType {
-    use winit::platform::wayland::EventLoopWindowTargetExtWayland;
-    use winit::platform::x11::EventLoopWindowTargetExtX11;
+    use winit::platform::wayland::EventLoopExtWayland;
+    use winit::platform::x11::EventLoopExtX11;
 
-    if _event_loop.is_wayland() {
+    if _event_loop.event_loop.is_wayland() {
         return WinitEventLoopType::Wayland;
     }
-    if _event_loop.is_x11() {
+    if _event_loop.event_loop.is_x11() {
         return WinitEventLoopType::X11;
     }
     return WinitEventLoopType::Unknown;

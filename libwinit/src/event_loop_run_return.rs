@@ -1,5 +1,8 @@
 use std::ffi::c_void;
 use std::sync::Arc;
+use std::collections::VecDeque;
+use std::sync::{Mutex, OnceLock};
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::time::Duration;
 
 use winit::platform::pump_events::EventLoopExtPumpEvents;
@@ -10,12 +13,17 @@ use crate::event_loop::WinitEventLoop;
 use crate::WinitUserEvent;
 use value_box::{ReturnBoxerResult, ValueBox, ValueBoxPointer};
 
+static EVENT_QUEUE: OnceLock<Mutex<VecDeque<WinitEvent>>> = OnceLock::new();
+
+fn event_queue() -> &'static Mutex<VecDeque<WinitEvent>> {
+    EVENT_QUEUE.get_or_init(|| Mutex::new(VecDeque::new()))
+}
+
 #[no_mangle]
 pub extern "C" fn winit_event_loop_run_return(
     event_loop: *mut ValueBox<WinitEventLoop>,
-    callback: extern "C" fn(*mut WinitEvent) -> WinitControlFlow,
 ) {
-    event_loop.with_mut_ok(|event_loop| {
+    let result = catch_unwind(AssertUnwindSafe(|| event_loop.with_mut_ok(|event_loop| {
         let mut processor = EventProcessor::new();
         let windows = Arc::clone(&event_loop.windows);
         let mut exit_requested = false;
@@ -43,21 +51,30 @@ pub extern "C" fn winit_event_loop_run_return(
                 .unwrap_or(false);
             let mut c_event = WinitEvent::default();
             if processor.process(event, &mut c_event) {
-                let ptr = Box::into_raw(Box::new(c_event));
-                let flow = callback(ptr);
-                unsafe { drop(Box::from_raw(ptr)); }
-                apply_control_flow(
-                    active,
-                    flow,
-                    &mut exit_requested,
-                    destroyed && all_windows_destroyed,
-                );
+                event_queue().lock().unwrap().push_back(c_event);
+                if destroyed && all_windows_destroyed {
+                    exit_requested = true;
+                    active.exit();
+                }
             }
             if exit_requested && destroyed && all_windows_destroyed {
                 active.exit();
             }
         });
-    }).log();
+    }).log()));
+    if result.is_err() {
+        eprintln!("libwinit: panic while running the event loop");
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn winit_event_queue_pop() -> *mut WinitEvent {
+    event_queue()
+        .lock()
+        .ok()
+        .and_then(|mut events| events.pop_front())
+        .map(|event| Box::into_raw(Box::new(event)))
+        .unwrap_or(std::ptr::null_mut())
 }
 
 #[no_mangle]
